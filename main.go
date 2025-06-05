@@ -1,24 +1,104 @@
-FROM golang:1.23
+package main
 
-# Install tesseract and dependencies
-RUN apt-get update && apt-get install -y \
-    tesseract-ocr \
-    libtesseract-dev \
-    libleptonica-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 
-# Set working dir
-WORKDIR /app
+	"github.com/otiai10/gosseract/v2"
+)
 
-# Copy Go files and build
-COPY go.mod go.sum ./
-RUN go mod download
+type OCRSuccessResponse struct {
+	Status  bool   `json:"status"`
+	Msg     string `json:"msg"`
+	OCRData string `json:"ocr_data"`
+}
 
-COPY . .
+type OCRErrorResponse struct {
+	Status bool   `json:"status"`
+	ErrMsg string `json:"err_msg"`
+}
 
-RUN go build -o ocrservice main.go
+func main() {
+	http.HandleFunc("/ocr", handleOCR)
+	fmt.Println("🚀 OCR server running on :8003")
+	http.ListenAndServe(":8003", nil)
+}
 
-EXPOSE 8003
+func handleOCR(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 
-CMD ["./ocrservice"]
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Only POST allowed")
+		return
+	}
+
+	var imageBytes []byte
+	var err error
+
+	url := r.FormValue("url")
+	if url != "" {
+		resp, err := http.Get(url)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			writeError(w, http.StatusBadRequest, "Failed to download image from URL")
+			return
+		}
+		defer resp.Body.Close()
+
+		imageBytes, err = io.ReadAll(resp.Body)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to read image from URL")
+			return
+		}
+	} else {
+		file, _, err := r.FormFile("image")
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Failed to get image file: "+err.Error())
+			return
+		}
+		defer file.Close()
+
+		imageBytes, err = io.ReadAll(file)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to read image file: "+err.Error())
+			return
+		}
+	}
+
+	client := gosseract.NewClient()
+	defer client.Close()
+
+	err = client.SetImageFromBytes(imageBytes)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to set image: "+err.Error())
+		return
+	}
+
+	text, err := client.Text()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "OCR error: "+err.Error())
+		return
+	}
+
+	writeSuccess(w, text)
+}
+
+func writeSuccess(w http.ResponseWriter, ocrText string) {
+	w.WriteHeader(http.StatusOK)
+	resp := OCRSuccessResponse{
+		Status:  true,
+		Msg:     "OCR berhasil",
+		OCRData: ocrText,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func writeError(w http.ResponseWriter, statusCode int, errMsg string) {
+	w.WriteHeader(statusCode)
+	resp := OCRErrorResponse{
+		Status: false,
+		ErrMsg: errMsg,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
