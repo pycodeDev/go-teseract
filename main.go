@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/otiai10/gosseract/v2"
 )
@@ -35,9 +36,22 @@ func handleOCR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var imageBytes []byte
-	var err error
+	var url string
 
-	url := r.FormValue("url")
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "application/json") {
+		var req struct {
+			URL string `json:"url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
+			return
+		}
+		url = req.URL
+	} else {
+		url = r.FormValue("url")
+	}
+
 	if url != "" {
 		resp, err := http.Get(url)
 		if err != nil || resp.StatusCode != http.StatusOK {
@@ -45,32 +59,32 @@ func handleOCR(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer resp.Body.Close()
-
 		imageBytes, err = io.ReadAll(resp.Body)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to read image from URL")
 			return
 		}
-	} else {
+	} else if strings.HasPrefix(contentType, "multipart/form-data") {
 		file, _, err := r.FormFile("image")
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "Failed to get image file: "+err.Error())
 			return
 		}
 		defer file.Close()
-
 		imageBytes, err = io.ReadAll(file)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to read image file: "+err.Error())
 			return
 		}
+	} else {
+		writeError(w, http.StatusBadRequest, "No image source provided")
+		return
 	}
 
 	client := gosseract.NewClient()
 	defer client.Close()
 
-	err = client.SetImageFromBytes(imageBytes)
-	if err != nil {
+	if err := client.SetImageFromBytes(imageBytes); err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to set image: "+err.Error())
 		return
 	}
